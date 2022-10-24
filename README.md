@@ -8,7 +8,8 @@ This C++ application is used to control one or more Azure Kinect DK cameras in p
 - [OpenGL v3.3+](https://www.khronos.org/opengl/wiki/Getting_Started#Downloading_OpenGL)
 
 ## Downloading
-- (TODO: Upload & link binaries)
+1. Ensure that your computer satisfies the prerequisites above.
+2. Visit the [releases](https://github.com/rajkundu/azure-kinect-controller/releases) page.
 
 ## Building from Source
 ### Dependencies
