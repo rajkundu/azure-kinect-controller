@@ -1,0 +1,12 @@
+# VS Code
+.vscode/
+
+# CMake/Make, executable
+build/
+
+##### Dependencies #####
+
+# BS Thread Pool
+/BS_thread_pool.hpp
+# Rigtorp/SPSCQueue
+/SPSCQueue.h
