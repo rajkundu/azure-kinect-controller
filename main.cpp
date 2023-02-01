@@ -18,7 +18,7 @@
 
 #include "utils.hpp"
 
-int main(int, char**)
+int main(int argc, char* argv[])
 {
     int return_code = 0;
 
@@ -50,7 +50,7 @@ int main(int, char**)
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows'
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
 
     // Set up Dear ImGui style
     ImGui::StyleColorsDark();
@@ -76,8 +76,8 @@ int main(int, char**)
     std::shared_ptr<bool[]> available_device_checkboxes_last;
     std::vector<std::string> available_device_serials;
     std::vector<int> device_idxs;
-    std::vector<std::shared_ptr<k4a::device>> devices;
-    std::vector<std::shared_ptr<k4a::record>> recordings;
+    std::vector<k4a::device> devices;
+    std::vector<k4a::record> recordings;
     std::vector<std::string> device_serials;
     std::vector<std::string> device_nicknames;
 
@@ -88,7 +88,7 @@ int main(int, char**)
     // Logging
     std::vector<std::string> k4a_log_msgs;
     if (k4a_set_debug_message_handler(k4a_log_callback, static_cast<void*>(&k4a_log_msgs), K4A_LOG_LEVEL_ERROR) == K4A_RESULT_SUCCEEDED){
-        putenv("K4A_ENABLE_LOG_TO_STDOUT=0");
+        _putenv("K4A_ENABLE_LOG_TO_STDOUT=0");
     }
 
     /***************************************
@@ -104,15 +104,14 @@ int main(int, char**)
     bool json_loaded_flag = false;
     std::vector<k4a_device_configuration_t> configs;
 
-    std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]> color_queues;
-    std::shared_ptr<ImVec2[]> color_shapes;
-    std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]> color_disps;
-    std::shared_ptr<GLuint[]> color_textures;
-
-    std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]> ir_queues;
-    std::shared_ptr<ImVec2[]> ir_shapes;
-    std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]> ir_disps;
-    std::shared_ptr<GLuint[]> ir_textures;
+    std::vector<std::unique_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>> color_queues;
+    std::vector<std::unique_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>> ir_queues;
+    std::vector<std::shared_ptr<Image<uint8_t>>> color_disps;
+    std::vector<std::shared_ptr<Image<uint8_t>>> ir_disps;
+    std::vector<ImVec2> color_shapes;
+    std::vector<ImVec2> ir_shapes;
+    std::vector<GLuint> color_textures;
+    std::vector<GLuint> ir_textures;
 
     bool recording_enabled = false;
     bool continuous_recording = true;
@@ -137,18 +136,13 @@ int main(int, char**)
 
             if (streaming){
                 for (int i = 0; i < num_enabled_devices; i++){
-                    auto device = devices[i];
 
                     // Get capture
                     std::shared_ptr<k4a::capture> capture = std::make_shared<k4a::capture>(k4a::capture());
-                    bool success = device->get_capture(capture.get(), std::chrono::milliseconds(5));
+                    bool success = devices[i].get_capture(capture.get(), std::chrono::milliseconds(5));
                     if (capture->is_valid()){
-                        if (recording_enabled){
-                            thread_pool->push_task(process_capture, capture, configs[i], color_queues[i], ir_queues[i], color_hflips[i], ir_hflips[i], recordings[i], continuous_recording || recording_write_enables[i]);
-                            recording_write_enables[i] = false;
-                        } else {
-                            thread_pool->push_task(process_capture, capture, configs[i], color_queues[i], ir_queues[i], color_hflips[i], ir_hflips[i], nullptr, false);
-                        }
+                        thread_pool->push_task(process_capture, capture, configs[i], color_queues[i].get(), ir_queues[i].get(), color_hflips[i], ir_hflips[i], recording_enabled ? &recordings[i] : nullptr, recording_enabled && (continuous_recording || recording_write_enables[i]));
+                        recording_write_enables[i] = false;
                     }
 
                     if (!color_queues[i]->empty()){
@@ -225,10 +219,10 @@ int main(int, char**)
                 available_device_checkboxes_last = std::shared_ptr<bool[]>(new bool[num_available_devices]);
                 for (int i = 0; i < num_available_devices; i++){
                     k4a::device device = k4a::device::open(i); 
-                    available_device_serials.push_back(std::move(device.get_serialnum()));
+                    available_device_serials.emplace_back(device.get_serialnum());
                     device.close();
 
-                    available_device_nicknames.push_back(std::string());
+                    available_device_nicknames.emplace_back();
                     available_device_checkboxes[i] = true;
                     available_device_checkboxes_last[i] = true;
                 }
@@ -418,7 +412,7 @@ int main(int, char**)
                                 num_enabled_devices = devices.size();
 
                                 // Initialize thread variables
-                                initialize_device_thread_vars(num_enabled_devices, thread_pool, color_queues, color_shapes, color_disps, color_textures, color_hflips, ir_queues, ir_shapes, ir_disps, ir_textures, ir_hflips);
+                                initialize_device_thread_vars(num_enabled_devices, thread_pool, color_queues, ir_queues, color_disps, ir_disps, color_shapes, ir_shapes, color_textures, ir_textures, color_hflips, ir_hflips);
 
                                 // Recordings
                                 initialize_recordings(recording_enabled, recording_write_enables, recordings, devices, configs, device_idxs, available_device_serials, available_device_nicknames, recording_save_path);
@@ -428,15 +422,11 @@ int main(int, char**)
                                 streaming = true;
                             } catch (k4a::error& e){
                                 print_error_info(e, "Error starting streaming");
-                                stop_streaming(devices, configs);
-                                close_recordings(recordings);
-                                close_devices(devices);
+                                stop_streaming(devices, configs, recordings);
                                 streaming = false;
                             }
                         } else {
-                            stop_streaming(devices, configs);
-                            close_recordings(recordings);
-                            close_devices(devices);
+                            stop_streaming(devices, configs, recordings);
                             streaming = false;
                         }
                     }
@@ -535,7 +525,7 @@ int main(int, char**)
                         ImGui::Begin((device_nicknames[i] + ": Color").c_str());
                         ImVec2 disp_area = ImGui::GetWindowContentRegionMax();
                         disp_area.y -= ImGui::GetFont()->FontSize + 2 * ImGui::GetStyle().FramePadding.y + (show_save_capture_btn ? 2 * ImGui::GetTextLineHeight() : 0) + 2 * ImGui::GetTextLineHeight();
-                        ImGui::Image(reinterpret_cast<void*>(color_textures[i]), get_img_disp_size(color_shapes[i], disp_area));
+                        ImGui::Image(reinterpret_cast<void*>(static_cast<intptr_t>(color_textures[i])), get_img_disp_size(color_shapes[i], disp_area));
 
                         bool color_hflip_temp = color_hflips[i];
                         ImGui::Checkbox("Flip", &color_hflip_temp);
@@ -551,7 +541,7 @@ int main(int, char**)
                         ImGui::Begin((device_nicknames[i] + ": IR").c_str());
                         ImVec2 disp_area = ImGui::GetWindowContentRegionMax();
                         disp_area.y -= ImGui::GetFont()->FontSize + 2 * ImGui::GetStyle().FramePadding.y + (show_save_capture_btn ? 2 * ImGui::GetTextLineHeight() : 0) + 2 * ImGui::GetTextLineHeight();
-                        ImGui::Image(reinterpret_cast<void*>(ir_textures[i]), get_img_disp_size(ir_shapes[i], disp_area));
+                        ImGui::Image(reinterpret_cast<void*>(static_cast<intptr_t>(ir_textures[i])), get_img_disp_size(ir_shapes[i], disp_area));
 
                         bool ir_hflip_temp = ir_hflips[i];
                         ImGui::Checkbox("Flip", &ir_hflip_temp);
@@ -596,7 +586,7 @@ int main(int, char**)
      ***************************************/
 
     // Azure Kinect
-    close_devices(devices);
+    // devices vector deletes automatically
 
     // Gui
     gui_cleanup(num_enabled_devices, color_textures, window);

@@ -81,6 +81,8 @@ template <typename T> class Image {
             return m_height * m_width * m_channels;
         }
 
+        T& operator[] (int idx){ return m_data_ptr[idx] };
+
         ~Image(){
             // data destruction handled by shared ptr
         }
@@ -100,51 +102,54 @@ static void remove_trailing_nulls(std::string& s){
     s.erase(std::find(s.begin(), s.end(), '\0'), s.end());
 }
 
-static void start_streaming(const std::vector<std::shared_ptr<k4a::device>>& devices, const std::vector<k4a_device_configuration_t>& configs){
+static void start_streaming(std::vector<k4a::device>& devices, const std::vector<k4a_device_configuration_t>& configs){
     for (auto wired_sync_mode : DEVICE_STREAMING_START_ORDER){
         for (int i = 0; i < devices.size(); i++){
             if (configs[i].wired_sync_mode == wired_sync_mode){
-                devices[i]->start_cameras(&configs[i]);
+                devices[i].start_cameras(&configs[i]);
             }
         }
     }
 }
 
-static void stop_streaming(const std::vector<std::shared_ptr<k4a::device>>& devices, const std::vector<k4a_device_configuration_t>& configs){
+static void stop_streaming(
+    std::vector<k4a::device>& devices,
+    const std::vector<k4a_device_configuration_t>& configs,
+    std::vector<k4a::record>& recordings
+    ){
     for (auto wired_sync_mode : DEVICE_STREAMING_STOP_ORDER){
         for (int i = 0; i < devices.size(); i++){
             if (configs[i].wired_sync_mode == wired_sync_mode){
-                devices[i]->stop_cameras();
+                devices[i].stop_cameras();
             }
         }
     }
+    // k4a::recording destructor will call flush & close automatically
+    recordings.clear();
+
+    // k4a::device destructor calls close
+    devices.clear();
 }
 
-static void open_devices(std::vector<int>& device_idxs, std::vector<std::shared_ptr<k4a::device>>& devices){
+static void open_devices(std::vector<int>& device_idxs, std::vector<k4a::device>& devices){
     // Create device handles
-    for (int i : device_idxs){
-        auto device_ptr = std::make_shared<k4a::device>(k4a::device::open(i));
-        devices.push_back(device_ptr);
+    for (const int i : device_idxs){
+        devices.emplace_back(k4a::device::open(i));
     }
 
     // Print device info
     std::cout << "\nDevice No.\tSerial No.\n" << std::string(32, '-') << "\n";
     for (int i = 0; i < devices.size(); i++){
-        std::cout << device_idxs[i] << "\t\t" << devices[i]->get_serialnum() << "\n";
+        std::cout << device_idxs[i] << "\t\t" << devices[i].get_serialnum() << "\n";
     }
     std::cout << std::flush;
     return;
 }
 
-static void close_devices(std::vector<std::shared_ptr<k4a::device>>& devices){
-    for (auto device : devices){
-        device->close();
+static void gui_cleanup(const int num_enabled_devices, const std::vector<GLuint>& color_textures, GLFWwindow* window){
+    if (color_textures.size() > 0){
+        glDeleteTextures(num_enabled_devices, color_textures.data());
     }
-    devices.clear();
-}
-
-static void gui_cleanup(const int num_enabled_devices, const std::shared_ptr<GLuint[]>& color_textures, GLFWwindow* window){
-    glDeleteTextures(num_enabled_devices >= 0 ? num_enabled_devices : 0, color_textures.get());
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -254,52 +259,73 @@ static void save_config_json(
 static void initialize_device_thread_vars(
     int num_enabled_devices,
     std::shared_ptr<BS::thread_pool>& thread_pool,
-    std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]>& color_queues,
-    std::shared_ptr<ImVec2[]>& color_shapes,
-    std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]>& color_disps,
-    std::shared_ptr<GLuint[]>& color_textures,
+    std::vector<std::unique_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>>& color_queues,
+    std::vector<std::unique_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>>& ir_queues,
+    std::vector<std::shared_ptr<Image<uint8_t>>>& color_disps,
+    std::vector<std::shared_ptr<Image<uint8_t>>>& ir_disps,
+    std::vector<ImVec2>& color_shapes,
+    std::vector<ImVec2>& ir_shapes,
+    std::vector<GLuint>& color_textures,
+    std::vector<GLuint>& ir_textures,
     std::vector<bool>& color_hflips,
-    std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]>& ir_queues,
-    std::shared_ptr<ImVec2[]>& ir_shapes,
-    std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]>& ir_disps,
-    std::shared_ptr<GLuint[]>& ir_textures,
     std::vector<bool>& ir_hflips
 ){
     // Create threads
     int num_threads = std::min<int>(2 * num_enabled_devices, std::thread::hardware_concurrency() - 1);
+    // int num_threads = std::thread::hardware_concurrency() - 1;
     thread_pool = std::shared_ptr<BS::thread_pool>(new BS::thread_pool(num_threads));
 
-    // Create color images
-    color_shapes = std::shared_ptr<ImVec2[]>(new ImVec2[num_enabled_devices]);
-    color_disps = std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]>(new std::shared_ptr<Image<uint8_t>>[num_enabled_devices]);
-    color_textures = std::shared_ptr<GLuint[]>(new GLuint[num_enabled_devices]);
-    glGenTextures(num_enabled_devices, color_textures.get());
-
-    // Create ir images
-    ir_shapes = std::shared_ptr<ImVec2[]>(new ImVec2[num_enabled_devices]);
-    ir_disps = std::shared_ptr<std::shared_ptr<Image<uint8_t>>[]>(new std::shared_ptr<Image<uint8_t>>[num_enabled_devices]);
-    ir_textures = std::shared_ptr<GLuint[]>(new GLuint[num_enabled_devices]);
-    glGenTextures(num_enabled_devices, ir_textures.get());
-
     // Image queues for display
-    color_queues = std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]>(new rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[num_enabled_devices]);
-    ir_queues = std::shared_ptr<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[]>(new rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>*[num_enabled_devices]);
+    color_queues.clear();
+    ir_queues.clear();
+
+    // Display image pointers
+    color_disps.clear();
+    ir_disps.clear();
+
+    // ImVec2s for ImGui/GL texture generation
+    color_shapes.clear();
+    ir_shapes.clear();
+
+    // GLuints storing OpenGL textures
+    color_textures.clear();
+    ir_textures.clear();
+
+    // Booleans
     color_hflips.clear();
     ir_hflips.clear();
+
     for (int i = 0; i < num_enabled_devices; i++){
-        color_queues[i] = new rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>(IMG_QUEUE_SIZE);
-        ir_queues[i] = new rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>(IMG_QUEUE_SIZE);
+        // Create display image queues
+        color_queues.push_back(std::move(std::make_unique<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>(IMG_QUEUE_SIZE)));
+        ir_queues.push_back(std::move(std::make_unique<rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>>(IMG_QUEUE_SIZE)));
+
+        // Create display image pointers
+        ir_disps.emplace_back();
+        color_disps.emplace_back();
+
+        // Create default ImVec2
+        color_shapes.emplace_back();
+        ir_shapes.emplace_back();
+
+        // Create display OpenGL textures (initialize to 0 = nullptr)
+        color_textures.push_back(0);
+        ir_textures.push_back(0);
 
         color_hflips.push_back(false);
         ir_hflips.push_back(false);
     }
+
+    // Generate color/ir textures for display images
+    glGenTextures(num_enabled_devices, color_textures.data());
+    glGenTextures(num_enabled_devices, ir_textures.data());
 }
 
 static void initialize_recordings(
     const bool recording_enabled,
     std::vector<bool>& recording_write_enables,
-    std::vector<std::shared_ptr<k4a::record>>& recordings,
-    const std::vector<std::shared_ptr<k4a::device>>& devices,
+    std::vector<k4a::record>& recordings,
+    const std::vector<k4a::device>& devices,
     const std::vector<k4a_device_configuration_t>& configs,
     const std::vector<int>& device_idxs,
     const std::vector<std::string>& available_device_serials,
@@ -311,7 +337,6 @@ static void initialize_recordings(
     if (!recording_enabled){
         for (int i = 0; i < devices.size(); i++){
             recording_write_enables.push_back(false);
-            recordings.push_back(nullptr);
         }
         return;
     }
@@ -325,29 +350,19 @@ static void initialize_recordings(
             nickname = available_device_serials[device_idxs[i]];
         }
         std::filesystem::path full_path = std::filesystem::path(recording_save_path) / (std::to_string(rec_start_time.count()) + "_" + nickname + ".mkv");
-        auto recording_ptr = std::make_shared<k4a::record>(k4a::record::create(full_path.string().c_str(), *devices[i], configs[i]));
-        recording_ptr->write_header();
-        recordings.push_back(recording_ptr);
-    }
-}
-
-static void close_recordings(const std::vector<std::shared_ptr<k4a::record>>& recordings){
-    for (auto recording : recordings){
-        if (recording != nullptr){
-            recording->flush();
-            recording->close();
-        }
+        recordings.emplace_back(k4a::record::create(full_path.string().c_str(), devices[i], configs[i]));
+        recordings[i].write_header();
     }
 }
 
 void process_capture(
-    const std::shared_ptr<k4a::capture>& capture,
+    const std::shared_ptr<k4a::capture> capture,
     const k4a_device_configuration_t& config,
     rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>* color_queue,
     rigtorp::SPSCQueue<std::shared_ptr<Image<uint8_t>>>* ir_queue,
     const bool hflip_color,
     const bool hflip_ir,
-    const std::shared_ptr<k4a::record>& recording,
+    k4a::record* recording,
     const bool recording_write_enable
 ){
     // Get image
@@ -425,7 +440,7 @@ void process_capture(
     }
 
     // Add capture to recording
-    if (recording_write_enable && recording != nullptr){
+    if (recording != nullptr && recording_write_enable){
         recording->write_capture(*capture);
     }
     return;
